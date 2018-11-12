@@ -7,6 +7,7 @@ use decode::decode_windows_1257;
 use decode::decode_utf16_be;
 use std::collections::HashMap;
 use std::fs::read_dir;
+use std::collections::HashSet;
 
 #[derive(Debug, Serialize)]
 pub struct DictEntry {
@@ -52,28 +53,28 @@ impl DictEntry {
             Err(e) => {
                 debug!("Failed to read {:?} as UTF-8 ({}), checking for 0xFF 0xFE bytes...", path, e);
                 if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-                    debug!("0xFF 0xFE bytes detected. Trying to decode as UTF-16LE...");
+                    trace!("0xFF 0xFE bytes detected. Trying to decode as UTF-16LE...");
                     match decode_utf16_le(&bytes[2..]) {
                         Ok(v) => Ok(v),
                         Err(e) => {
                             debug!("Failed to read as UTF-16LE: {}", e);
-                            debug!("Will try to read as windows 1257...");
+                            trace!("Will try to read as windows 1257...");
                             decode_windows_1257(&bytes)
                         }
                     }
                 } else if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-                    debug!("0xFE 0xFF bytes detected. Trying to decode as UTF-16BE...");
+                    trace!("0xFE 0xFF bytes detected. Trying to decode as UTF-16BE...");
                     match decode_utf16_be(&bytes[2..]) {
                         Ok(v) => Ok(v),
                         Err(e) => {
                             debug!("Failed to read as UTF-16BE: {}", e);
-                            debug!("Will try to read as windows 1257...");
+                            trace!("Will try to read as windows 1257...");
                             decode_windows_1257(&bytes)
                         }
                     }
                 } else {
                     debug!("No 0xFF 0xFE bytes.");
-                    debug!("Will try to read as windows 1257...");
+                    trace!("Will try to read as windows 1257...");
                     decode_windows_1257(&bytes)
                 }
             }
@@ -81,7 +82,7 @@ impl DictEntry {
     }
 
     // TODO: maybe use the .? syntax to propagate Err up
-    pub fn collect_entries(dir: &Path) -> Result<Vec<DictEntry>, String> {
+    pub fn collect_entries(dir: &Path, audio_exts: &HashSet<String>, text_exts: &HashSet<String>) -> Result<Vec<DictEntry>, String> {
         let mut paths: Vec<String> = Vec::new();
         let mut files: Vec<String> = Vec::new();
         let mut entries: HashMap<String, DictEntry> = HashMap::new();
@@ -156,24 +157,21 @@ impl DictEntry {
                     },
                     None => return Err(format!("Cannot resolve containing directory for {:?}!", file))
                 };
-                match extension {
-                    "wav" => {
-                        if !entry.audio_path.is_empty() {
-                            return Err(format!("Naming collision: \"{}\" vs \"{}\"!", entry.audio_path, file_str));
-                        }
-                        entry.audio_path = String::from(file_str.clone());
-                    },
-                    "txt" => {
-                        if !entry.transcript_path.is_empty() {
-                            return Err(format!("Naming collision: \"{}\" vs \"{}\"!", entry.transcript_path, file_str));
-                        }
-                        entry.transcript_path = String::from(file_str.clone());
-                        entry.transcript = DictEntry::read_transcript(file)?;
-                    },
-                    _ => {
-                        warn!("Unknown file extension \"{}\", file {:?}!", extension, file);
-                        remove = Some(String::from(file_stem));
+
+                if audio_exts.contains(&extension.to_lowercase()) {
+                    if !entry.audio_path.is_empty() {
+                        return Err(format!("Naming collision: \"{}\" vs \"{}\"!", entry.audio_path, file_str));
                     }
+                    entry.audio_path = String::from(file_str.clone());
+                } else if text_exts.contains(&extension.to_lowercase()) {
+                    if !entry.transcript_path.is_empty() {
+                        return Err(format!("Naming collision: \"{}\" vs \"{}\"!", entry.transcript_path, file_str));
+                    }
+                    entry.transcript_path = String::from(file_str.clone());
+                    entry.transcript = DictEntry::read_transcript(file)?;
+                } else {
+                    warn!("Unknown file extension \"{}\", file {:?}!", extension, file);
+                    remove = Some(String::from(file_stem));
                 }
             }
 
