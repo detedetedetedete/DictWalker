@@ -6,18 +6,16 @@ use std::io;
 use std::io::Read;
 use regex::Regex;
 use std::str::FromStr;
-use tensorflow::Graph;
-use tensorflow::ImportGraphDefOptions;
-use tensorflow::Operation;
-use tensorflow::Session;
-use tensorflow::SessionOptions;
-use tensorflow::SessionRunArgs;
-use tensorflow::FetchToken;
-use tensorflow::Tensor;
 use std::error::Error;
-use serde_json;
+use libc::c_void;
+use libc::c_char;
+use libc::size_t;
+use std::ffi::CString;
+use model_runner;
+use std::ffi::CStr;
+use std::collections::HashSet;
 use model_def::ModelDef;
-use io_map::IOMap;
+use std::iter::FromIterator;
 
 pub trait PhonemeResolver {
     fn resolve(&self, graphemes: &str) -> Option<Vec<Phoneme>>;
@@ -127,144 +125,75 @@ impl PhonemeResolver for DummyPhonemeResolver {
 }
 
 pub struct TensorflowPhonemeResolver {
-    model_def: ModelDef,
-    in_map: IOMap,
-    out_map: IOMap,
-    encoder: Graph,
-    encoder_input: Operation,
-    encoder_outputs: Vec<Operation>,
-    decoder: Graph,
-    decoder_inputs: Vec<Operation>,
-    decoder_outputs: Vec<Operation>,
-    start_token: String,
-    end_token: String
+    ptr: *const c_void,
+    allowed_tokens: HashSet<String>
 }
 
 impl TensorflowPhonemeResolver {
     pub fn load(model_folder_path: &Path) -> Result<TensorflowPhonemeResolver, Box<dyn Error>> {
-        let mut model_def: ModelDef = serde_json::from_reader(
+        let model_def: ModelDef = serde_json::from_reader(
             File::open(model_folder_path.join("model.json")).unwrap()
         ).unwrap();
-        let mut encoder_proto: Vec<u8> = Vec::new();
-        File::open(model_folder_path.join("encoder_inference_model.pb"))?.read_to_end(&mut encoder_proto)?;
-        let mut encoder = Graph::new();
-        encoder.import_graph_def(&encoder_proto, &ImportGraphDefOptions::new())?;
-        let encoder_input = encoder.operation_by_name_required("encoder_input")?;
-        let mut encoder_outputs: Vec<Operation> = Vec::new();
-        for op in encoder.operation_iter() {
-            if op.name().unwrap().ends_with("_output") {
-                encoder_outputs.push(op);
-            }
-        }
-
-        let mut decoder_proto: Vec<u8> = Vec::new();
-        File::open(model_folder_path.join("decoder_inference_model.pb"))?.read_to_end(&mut decoder_proto)?;
-        let mut decoder = Graph::new();
-        decoder.import_graph_def(&decoder_proto, &ImportGraphDefOptions::new())?;
-        let mut decoder_inputs: Vec<Operation> = Vec::new();
-        let mut decoder_outputs: Vec<Operation> = Vec::new();
-        decoder_inputs.push(decoder.operation_by_name_required("decoder_input")?);
-        for op in decoder.operation_iter() {
-            let op_name = op.name().unwrap();
-            if op_name.ends_with("_state_h") || op_name.ends_with("_state_c") {
-                decoder_inputs.push(op);
-            } else if op_name.ends_with("_output") {
-                decoder_outputs.push(op);
-            }
-        }
-
-        let start_token = "[S]".to_string();
-        let end_token = "[E]".to_string();
-        model_def.out_tokens.push(start_token.clone());
-        model_def.out_tokens.push(end_token.clone());
-
+        let path: CString = CString::new(model_folder_path.as_os_str().to_str().unwrap())?;
         Ok(TensorflowPhonemeResolver {
-            in_map: IOMap::new(model_def.in_tokens.clone()),
-            out_map: IOMap::new(model_def.out_tokens.clone()),
-            model_def,
-            encoder,
-            encoder_input,
-            encoder_outputs,
-            decoder,
-            decoder_inputs,
-            decoder_outputs,
-            start_token,
-            end_token
+            ptr: unsafe { model_runner::getModelRunnerInstance(path.as_ptr()) },
+            allowed_tokens: HashSet::from_iter(model_def.in_tokens)
         })
+    }
+}
+
+impl Drop for TensorflowPhonemeResolver {
+    fn drop(&mut self) {
+        unsafe {
+            model_runner::deleteModelRunnerInstance(self.ptr)
+        }
     }
 }
 
 impl PhonemeResolver for TensorflowPhonemeResolver {
     fn resolve(&self, graphemes: &str) -> Option<Vec<Phoneme>> {
-        let mut encoder_session = Session::new(&SessionOptions::new(), &self.encoder).unwrap();
-
-        let mut encoder_input: Tensor<f32> = Tensor::new(&[1, self.model_def.max_in_length as u64, self.in_map.len() as u64]);
-
-        let g: Vec<String> = graphemes.chars().map(|a| a.to_string()).collect();
-        self.in_map.encode(
-            g.iter(),
-            self.model_def.max_in_length,
-            &mut encoder_input
-        );
-
-        let mut encoder_args = SessionRunArgs::new();
-        encoder_args.add_feed(
-            &self.encoder_input,
-            0,
-        &encoder_input
-        );
-
-        let mut encoder_fetch_tokens: Vec<FetchToken> = Vec::new();
-        for encoder_output in &self.encoder_outputs {
-            encoder_fetch_tokens.push(
-                encoder_args.request_fetch(&encoder_output, 0)
+        let mut phonemes: Vec<String> = Vec::new();
+        let mut _graphemes: Vec<CString> = Vec::new();
+        let mut last = 0;
+        for c in graphemes.chars() {
+            let len = c.len_utf8();
+            let slice = &graphemes[last..last+len];
+            if !self.allowed_tokens.contains(slice) {
+                return None;
+            }
+            _graphemes.push(CString::new(slice).unwrap());
+            last += len;
+        }
+        unsafe {
+            let mut grphms: Vec<*const c_char> = vec![std::ptr::null(); graphemes.chars().count()];
+            let mut result_size: size_t = 0;
+            let mut result: *const *const c_char = std::ptr::null();
+            for (idx, c) in _graphemes.iter().enumerate() {
+                grphms[idx] = c.as_ptr();
+            }
+            model_runner::modelRunnerInfer(
+                self.ptr,
+                grphms.as_ptr(),
+                grphms.len(),
+                &mut result,
+                &mut result_size,
+                255
             );
+
+            for i in 0..result_size {
+                let c_str: &CStr = CStr::from_ptr(*result.offset(i as isize));
+                phonemes.push(c_str.to_str().unwrap().clone().to_owned());
+                libc::free(*result.offset(i as isize) as *mut c_void);
+            }
+            libc::free(result as *mut c_void);
         }
 
-        encoder_session.run(&mut encoder_args).unwrap();
-        let mut states_vec: Vec<Tensor<f32>> = Vec::new();
-        for encoder_fetch_token in encoder_fetch_tokens {
-            states_vec.push(encoder_args.fetch(encoder_fetch_token).unwrap());
-        }
+        let result: Vec<Phoneme> = phonemes.iter()
+            .skip(1)
+            .take(phonemes.len()-2)
+            .map(|val| Phoneme::from_str(val).unwrap())
+            .collect();
 
-        let mut last_output: Tensor<f32> = Tensor::new(&[1, self.model_def.max_out_length as u64, self.out_map.len() as u64]);
-        let mut decoder_session = Session::new(&SessionOptions::new(), &self.decoder).unwrap();
-        let mut decoder_args = SessionRunArgs::new();
-        self.out_map.encode(
-            vec![self.start_token.clone()].iter(),
-            self.model_def.max_out_length,
-            &mut last_output
-        );
-
-
-        while self.out_map.decode(&last_output)[0] != self.end_token {
-            let mut decoder_fetch_tokens: Vec<FetchToken> = Vec::new();
-            for decoder_output in &self.decoder_outputs {
-                decoder_fetch_tokens.push(
-                    decoder_args.request_fetch(&decoder_output, 0)
-                );
-            }
-            for (idx, dec_input) in self.decoder_inputs.iter().enumerate() {
-                decoder_args.add_feed(
-                    dec_input,
-                    0,
-                    match idx {
-                        0 => &last_output,
-                        _ => &states_vec[idx-1]
-                    }
-                );
-            }
-            decoder_session.run(&mut decoder_args).unwrap();
-            for (idx, decoder_fetch_token) in decoder_fetch_tokens.iter().enumerate() {
-                if idx == 0 {
-                    last_output = decoder_args.fetch(*decoder_fetch_token).unwrap();
-                } else {
-                    states_vec.push(decoder_args.fetch(*decoder_fetch_token).unwrap());
-                }
-            }
-        }
-
-        None
-
+        Some(result)
     }
 }

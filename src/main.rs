@@ -8,7 +8,6 @@ extern crate regex;
 #[macro_use] extern crate log;
 #[macro_use] extern crate lazy_static;
 extern crate serde;
-extern crate tensorflow;
 extern crate libc;
 
 use dict_entry::DictEntry;
@@ -35,7 +34,6 @@ mod logging;
 mod training_entry;
 mod phonemes;
 mod phoneme_resolvers;
-mod io_map;
 mod model_def;
 mod model_runner;
 
@@ -117,4 +115,6 @@ fn main() {
         },
         _ => ()
     };
+
+    info!("Done.");
 }
