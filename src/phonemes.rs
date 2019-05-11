@@ -15,12 +15,7 @@ pub struct Phoneme {
 impl Phoneme {
     pub fn from_symbol(symbol: &str, accent: bool) -> Phoneme {
         match symbol {
-            " " => Phoneme {
-                symbol: String::from(" "),
-                ordinal: 0,
-                accented: false,
-                valid: true
-            },
+            " " => Phoneme::from_symbol("[PAUSE]", accent),
             "A" => Phoneme {
                 symbol: String::from("A"),
                 ordinal: 1,

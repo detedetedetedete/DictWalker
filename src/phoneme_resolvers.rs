@@ -152,6 +152,22 @@ impl Drop for TensorflowPhonemeResolver {
 
 impl PhonemeResolver for TensorflowPhonemeResolver {
     fn resolve(&self, graphemes: &str) -> Option<Vec<Phoneme>> {
+        if graphemes.contains("[midwordpause]") {
+            let mut result: Vec<Phoneme> = vec![];
+            for (idx, part) in graphemes.split("[midwordpause]").enumerate() {
+                match self.resolve(part) {
+                    Some(mut r) => {
+                        if idx != 0 {
+                            result.push(Phoneme::from_str("[MIDWORDPAUSE]").unwrap());
+                        }
+                        r.drain(0..).for_each(|v|result.push(v));
+                    },
+                    None => return None
+                }
+            }
+            return Some(result);
+        }
+
         let mut phonemes: Vec<String> = Vec::new();
         let mut _graphemes: Vec<CString> = Vec::new();
         let mut last = 0;
